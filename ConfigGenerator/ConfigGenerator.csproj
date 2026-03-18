@@ -14,6 +14,11 @@
         <Title>NEConfigGenerator</Title>
         <Description>Generates a partial config class with members that will be automatically loaded from env-files or openbao/vault instances</Description>
         <Authors>NilEis</Authors>
+        <Copyright>GPL-3.0-or-later</Copyright>
+        <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/NilEis/NeConfigGenerator</RepositoryUrl>
+        <PackageProjectUrl>https://github.com/NilEis/NeConfigGenerator</PackageProjectUrl>
+        <Version>1.0.1</Version>
     </PropertyGroup>
 
     <ItemGroup>
@@ -26,9 +31,14 @@
     </ItemGroup>
 
     <ItemGroup>
-      <Content Include="..\License">
-        <Link>License</Link>
-      </Content>
+        <Content Include="..\License">
+            <Link>License</Link>
+        </Content>
+        <None Include="..\LICENSE" Pack="true" PackagePath=""/>
+    </ItemGroup>
+    
+    <ItemGroup>
+        <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false"/>
     </ItemGroup>
 
 

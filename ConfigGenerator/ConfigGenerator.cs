@@ -54,7 +54,9 @@ public class ConfigGenerator : IIncrementalGenerator
             "using Microsoft.Extensions.Logging;",
             "using Microsoft.Extensions.Logging.Console;",
             "using System.Text.RegularExpressions;",
-            "using System.Text.Json;"
+            "using System.Text.Json;",
+            "using System.Net.Http;",
+            "using System.Net;"
         };
         var variableSet = new HashSet<string>();
         var variables = new StringBuilder();
