@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="ConfigGenerator/ConfigGenerator.csproj" />
+  <Project Path="TextConfig/TextConfig.csproj" />
 </Solution>

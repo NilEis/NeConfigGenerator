@@ -18,7 +18,7 @@
         <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
         <RepositoryUrl>https://github.com/NilEis/NeConfigGenerator</RepositoryUrl>
         <PackageProjectUrl>https://github.com/NilEis/NeConfigGenerator</PackageProjectUrl>
-        <Version>1.0.1</Version>
+        <Version>1.0.3</Version>
     </PropertyGroup>
 
     <ItemGroup>
@@ -28,6 +28,8 @@
         </PackageReference>
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.3.0"/>
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.3.0"/>
+        <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
     </ItemGroup>
 
     <ItemGroup>

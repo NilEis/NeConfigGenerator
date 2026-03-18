@@ -14,21 +14,71 @@ namespace ConfigGenerator;
 [Generator(LanguageNames.CSharp)]
 public class ConfigGenerator : IIncrementalGenerator
 {
-    private class ConfigVariable
+    private abstract class ConfigVariable
     {
         public string Type { get; set; } = null!;
         public string Name { get; set; } = null!;
         public bool Anonymise { get; set; } = false;
         public bool PrintVar { get; set; } = true;
-        public bool IsJson { get; set; } = false;
+        protected static readonly Regex EnvNameConverterRegex = new("(?<=[a-z])(?=[A-Z])");
+
+        public virtual string GetDefinitionString()
+        {
+            return $"public static {Type} {Name} {{ get; private set; }}";
+        }
+
+        public abstract string GetInitialiserString();
+    }
+
+    private abstract class LoadableConfigVariable : ConfigVariable
+    {
         public Optional<string> DefaultValue { get; set; } = new();
-        public Optional<string> ConstantVariable { get; set; } = new();
-        public Optional<string> VaultVariable { get; set; } = new();
+
+        public override string GetDefinitionString()
+        {
+            return
+                $"public static {Type} {Name} {{ get; private set; }}{(DefaultValue.HasValue ? $" = {DefaultValue.Value};" : "")}";
+        }
+    }
+
+    private class EnvConfigVariable : LoadableConfigVariable
+    {
+        public bool IsJson { get; set; } = false;
+
+        public override string GetInitialiserString()
+        {
+            return
+                $"{Name} = {(IsJson ? "GetEnvVarJson" : "GetEnvVar")}<{Type}>(\"{EnvNameConverterRegex.Replace(Name, "_").ToUpper()}\"{(DefaultValue.HasValue ? $", {DefaultValue.Value}" : "")});";
+        }
+    }
+
+
+    private class ConstantConfigVariable : ConfigVariable
+    {
+        public string ConstantVariable { get; set; } = null!;
+
+        public override string GetInitialiserString()
+        {
+            return $"{Name} = {ConstantVariable};";
+        }
+    }
+
+    private class VaultConfigVariable : LoadableConfigVariable
+    {
+        public string VaultVariable { get; set; } = null!;
+
+        public override string GetInitialiserString()
+        {
+            var normalizedName = EnvNameConverterRegex.Replace(Name, "_").ToLower();
+            return
+                $"{Name} = HostNotFound ? string.Empty : LoadFromVault(\"{VaultVariable}\", \"{normalizedName}\"{(DefaultValue.HasValue ? $", {DefaultValue.Value}" : "")});";
+        }
     }
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var classes = context.SyntaxProvider.ForAttributeWithMetadataName("ConfigGenerator.ConfigElement",
+        var classes = context.SyntaxProvider.ForAttributeWithMetadataName(
+            "ConfigGenerator.ConfigMarker",
             predicate: PredicateTest,
             transform: TransformTest
         ).Where(m => m is not null);
@@ -63,86 +113,26 @@ public class ConfigGenerator : IIncrementalGenerator
         var vaultVariables = new StringBuilder();
         var constructor = new StringBuilder();
         var print = new StringBuilder("Loaded values:\\n");
-        var envNameConverterRegex = new Regex("(?<=[a-z])(?=[A-Z])");
         var elements = new List<ConfigVariable>();
-        var vaultValues = 0;
         foreach (var attribute in symbol.GetAttributes())
         {
-            if (string.IsNullOrEmpty(attribute.AttributeClass?.Name) ||
-                (attribute.AttributeClass?.Name != "ConfigElement"))
+            if (string.IsNullOrEmpty(attribute.AttributeClass?.Name) || attribute.AttributeClass is null)
             {
                 continue;
             }
 
-            var configVar = new ConfigVariable();
-
-            foreach (var v in attribute.NamedArguments)
+            if (attribute.AttributeClass.Name is not
+                (
+                "ConfigElement"
+                or "VaultConfigElement"
+                or "ConstantConfigElement"
+                or "EnvConfigElement"
+                ))
             {
-                switch (v.Key)
-                {
-                    case "Type":
-                        var type = v.Value.Value as INamedTypeSymbol ??
-                                   v.Value.Value as ITypeSymbol;
-                        var typeUsing = type?.ContainingNamespace?.ToDisplayString();
-                        if (typeUsing is not null)
-                        {
-                            usings.Add($"using {typeUsing};");
-                        }
-
-                        configVar.Type = type!.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
-                        break;
-                    case "Name":
-                        if (v.Value.Value is string name)
-                        {
-                            configVar.Name = name;
-                        }
-
-                        break;
-                    case "Init":
-                        if (v.Value.Value is string initStr)
-                        {
-                            configVar.ConstantVariable = new Optional<string>(initStr);
-                        }
-
-                        break;
-                    case "Default":
-                        if (!v.Value.IsNull)
-                        {
-                            configVar.DefaultValue = new Optional<string>(ToLiteral(v.Value));
-                        }
-
-                        break;
-                    case "Anonymise":
-                        if (v.Value.Value is bool anon)
-                        {
-                            configVar.Anonymise = anon;
-                        }
-
-                        break;
-                    case "PrintVar":
-                        if (v.Value.Value is bool printV)
-                        {
-                            configVar.PrintVar = printV;
-                        }
-
-                        break;
-                    case "IsJson":
-                        if (v.Value.Value is bool isJson)
-                        {
-                            configVar.IsJson = isJson;
-                        }
-
-                        break;
-                    case "FromVaultPath":
-                        if (v.Value.Value is string vaultPath)
-                        {
-                            configVar.VaultVariable = new Optional<string>(vaultPath);
-                            vaultValues++;
-                        }
-
-                        break;
-                }
+                continue;
             }
+
+            var configVar = ParseConfigElement(attribute, usings);
 
             variableSet.Add(configVar.Name);
             elements.Add(configVar);
@@ -150,15 +140,7 @@ public class ConfigGenerator : IIncrementalGenerator
 
         foreach (var v in elements)
         {
-            variables.Append($"    public static {v.Type} {v.Name} {{ get; private set; }}");
-            if (v.DefaultValue.HasValue)
-            {
-                variables.AppendLine($" = {v.DefaultValue.Value};");
-            }
-            else
-            {
-                variables.AppendLine();
-            }
+            variables.AppendLine($"    {v.GetDefinitionString()}");
 
             if (v.PrintVar)
             {
@@ -168,34 +150,14 @@ public class ConfigGenerator : IIncrementalGenerator
                         : $"       - {v.Name}: {{{v.Name}}}\\n");
             }
 
-            if (v.ConstantVariable.HasValue)
-            {
-                constructor.AppendLine($"        {v.Name} = {v.ConstantVariable.Value};");
-            }
-            else if (v.VaultVariable.HasValue)
-            {
-                constructor.AppendLine(
-                    $"        {v.Name} = HostNotFound ? string.Empty : LoadFromVault(\"{v.VaultVariable.Value}\", \"{envNameConverterRegex.Replace(v.Name, "_").ToLower()}\");");
-            }
-            else
-            {
-                if (v.IsJson)
-                {
-                    constructor.AppendLine(
-                        $"        {v.Name} = GetEnvVarJson<{v.Type}>(\"{envNameConverterRegex.Replace(v.Name, "_").ToUpper()}\"{(v.DefaultValue.HasValue ? $", {v.DefaultValue.Value}" : "")});");
-                }
-                else
-                {
-                    constructor.AppendLine(
-                        $"        {v.Name} = GetEnvVar<{v.Type}>(\"{envNameConverterRegex.Replace(v.Name, "_").ToUpper()}\"{(v.DefaultValue.HasValue ? $", {v.DefaultValue.Value}" : "")});");
-                }
-            }
+
+            constructor.AppendLine($"        {v.GetInitialiserString()};");
         }
 
         var source = GenerateMainSource(usings, namespaceName, className, variables, constructor, print);
         spc.AddSource($"{className}.g.cs", SourceText.From(source, Encoding.UTF8));
 
-        if (vaultValues <= 0)
+        if (!elements.Any(v => v is VaultConfigVariable))
         {
             return;
         }
@@ -228,6 +190,113 @@ public class ConfigGenerator : IIncrementalGenerator
         spc.AddSource($"{className}.vault.g.cs", SourceText.From(vaultSource, Encoding.UTF8));
     }
 
+    private static ConfigVariable SelectVarType(AttributeData attribute)
+    {
+        if (attribute.AttributeClass!.Name == "ConstantConfigElement")
+        {
+            var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Init");
+            if (param.Value.Value is string value)
+            {
+                return new ConstantConfigVariable
+                {
+                    ConstantVariable = value
+                };
+            }
+        }
+        else if (attribute.AttributeClass!.Name == "VaultConfigElement" ||
+                 attribute.AttributeClass!.Name == "EnvConfigElement")
+        {
+            var defaultValue = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Default");
+            LoadableConfigVariable ret;
+            switch (attribute.AttributeClass!.Name)
+            {
+                case "VaultConfigElement":
+                {
+                    var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "FromVaultPath");
+                    if (param.Value.Value is string value)
+                    {
+                        ret = new VaultConfigVariable()
+                        {
+                            VaultVariable = value
+                        };
+                    }
+                    else
+                    {
+                        throw new Exception("No vault path specified");
+                    }
+
+                    break;
+                }
+                case "EnvConfigElement":
+                {
+                    var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "IsJson");
+                    ret = new EnvConfigVariable
+                    {
+                        IsJson = param.Value.Value as bool? ?? false
+                    };
+
+                    break;
+                }
+                default: throw new InvalidOperationException("Unreachable 2");
+            }
+
+            if (!defaultValue.Value.IsNull)
+            {
+                ret.DefaultValue = new Optional<string>(ToLiteral(defaultValue.Value));
+            }
+
+            return ret;
+        }
+
+        throw new InvalidOperationException("Unreachable 2");
+    }
+
+    private static ConfigVariable ParseConfigElement(AttributeData attribute, HashSet<string> usings)
+    {
+        var configVar = SelectVarType(attribute);
+
+        foreach (var v in attribute.NamedArguments)
+        {
+            switch (v.Key)
+            {
+                case "Type":
+                    var type = v.Value.Value as INamedTypeSymbol ??
+                               v.Value.Value as ITypeSymbol;
+                    var typeUsing = type?.ContainingNamespace?.ToDisplayString();
+                    if (typeUsing is not null)
+                    {
+                        usings.Add($"using {typeUsing};");
+                    }
+
+                    configVar.Type = type!.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                    break;
+                case "Name":
+                    if (v.Value.Value is string name)
+                    {
+                        configVar.Name = name;
+                    }
+
+                    break;
+                case "Anonymise":
+                    if (v.Value.Value is bool anon)
+                    {
+                        configVar.Anonymise = anon;
+                    }
+
+                    break;
+                case "PrintVar":
+                    if (v.Value.Value is bool printV)
+                    {
+                        configVar.PrintVar = printV;
+                    }
+
+                    break;
+            }
+        }
+
+        return configVar;
+    }
+
     private static string GenerateVaultSource(HashSet<string> usings, string namespaceName, string className)
     {
         var vaultSource =
@@ -243,7 +312,7 @@ public class ConfigGenerator : IIncrementalGenerator
                   private static readonly Dictionary<string, Dictionary<string, string>> VaultCache = new Dictionary<string, Dictionary<string, string>>();
                   private static bool HostNotFound;
                   
-                  public static string LoadFromVault(string path, string member)
+                  public static string LoadFromVault(string path, string member, string? defaultValue = null)
                   {
                     if(string.IsNullOrWhiteSpace(VaultIp))
                     {
@@ -255,7 +324,7 @@ public class ConfigGenerator : IIncrementalGenerator
                     }
                     try
                     {
-                        return LoadFromVault(path, member, true);
+                        return LoadFromVault(path, member, defaultValue, true);
                     }
                     catch (AggregateException e)
                     {
@@ -264,7 +333,7 @@ public class ConfigGenerator : IIncrementalGenerator
                     }
                   }
                   
-                  private static string LoadFromVault(string path, string member, bool firstTime)
+                  private static string LoadFromVault(string path, string member, string? defaultValue, bool firstTime)
                   {
                     if(!VaultCache.TryGetValue(path, out var cached))
                     {
@@ -276,7 +345,7 @@ public class ConfigGenerator : IIncrementalGenerator
                             if(res.StatusCode == HttpStatusCode.ServiceUnavailable && firstTime)
                             {
                                 UnsealVault();
-                                return LoadFromVault(path, member, false);
+                                return LoadFromVault(path, member, defaultValue, false);
                             }
                             throw new VaultException($"Could not load {path}: {res.ReasonPhrase}.");                        
                         }
@@ -294,6 +363,10 @@ public class ConfigGenerator : IIncrementalGenerator
                     }
                     catch
                     {
+                        if(defaultValue is not null)
+                        {
+                            return defaultValue;
+                        }
                         throw new VaultException($"Could not load {member} from {path}.");
                     }
                   }
