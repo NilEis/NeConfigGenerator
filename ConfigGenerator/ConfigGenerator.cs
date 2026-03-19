@@ -377,7 +377,7 @@ public class ConfigGenerator : IIncrementalGenerator
                       {
                           throw new VaultException($"No valid VaultUnsealKey was found in the vault.");
                       }
-                      var request = new HttpRequestMessage(HttpMethod.Post, $"{VaultIp}/v1//sys/unseal");
+                      var request = new HttpRequestMessage(HttpMethod.Post, $"{VaultIp}/v1/sys/unseal");
                       request.Content = new StringContent(JsonSerializer.Serialize(new { key = VaultUnsealKey }));
                       var res = Client.SendAsync(request).Result;
                       if(!res.IsSuccessStatusCode)
