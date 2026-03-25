@@ -1,10 +1,7 @@
-﻿using System.Text.RegularExpressions;
-using ConfigGenerator;
+﻿using ConfigGenerator;
 
 namespace TextConfig;
-
-// lVGH1t2wImdtCPE0OjTwYtLe
-[ConfigMarker]
+[ConfigMarker(LoadEnvFile = true, OutputLog = false)]
 [EnvConfigElement(
     Type = typeof(string),
     Name = "VaultIp",
@@ -44,8 +41,4 @@ namespace TextConfig;
     Name = "DbConnectionString",
     Init =
         "$\"{DatabaseIp}:{DatabasePort}\"")]
-public static partial class Config
-{
-    [GeneratedRegex(" #.*$")]
-    private static partial Regex CommentMatcher();
-}
+public static partial class Config;

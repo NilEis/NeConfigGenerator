@@ -14,6 +14,12 @@ namespace ConfigGenerator;
 [Generator(LanguageNames.CSharp)]
 public class ConfigGenerator : IIncrementalGenerator
 {
+    private class Configuration
+    {
+        public bool OutputLog { get; set; } = true;
+        public bool LoadEnvFile { get; set; } = true;
+    }
+
     private abstract class ConfigVariable
     {
         public string Type { get; set; } = null!;
@@ -101,12 +107,7 @@ public class ConfigGenerator : IIncrementalGenerator
         var usings = new HashSet<string>
         {
             "using System.Globalization;",
-            "using Microsoft.Extensions.Logging;",
-            "using Microsoft.Extensions.Logging.Console;",
-            "using System.Text.RegularExpressions;",
-            "using System.Text.Json;",
-            "using System.Net.Http;",
-            "using System.Net;"
+            "using System.Text.Json;"
         };
         var variableSet = new HashSet<string>();
         var variables = new StringBuilder();
@@ -114,6 +115,7 @@ public class ConfigGenerator : IIncrementalGenerator
         var constructor = new StringBuilder();
         var print = new StringBuilder("Loaded values:\\n");
         var elements = new List<ConfigVariable>();
+        var settings = new Configuration();
         foreach (var attribute in symbol.GetAttributes())
         {
             if (string.IsNullOrEmpty(attribute.AttributeClass?.Name) || attribute.AttributeClass is null)
@@ -121,15 +123,18 @@ public class ConfigGenerator : IIncrementalGenerator
                 continue;
             }
 
-            if (attribute.AttributeClass.Name is not
-                (
-                "ConfigElement"
-                or "VaultConfigElement"
-                or "ConstantConfigElement"
-                or "EnvConfigElement"
-                ))
+            switch (attribute.AttributeClass.Name)
             {
-                continue;
+                case "ConfigMarker":
+                    ParseConfiguration(attribute, ref settings);
+                    continue;
+                case "ConfigElement":
+                case "VaultConfigElement":
+                case "ConstantConfigElement":
+                case "EnvConfigElement":
+                    break;
+                default:
+                    continue;
             }
 
             var configVar = ParseConfigElement(attribute, usings);
@@ -154,101 +159,144 @@ public class ConfigGenerator : IIncrementalGenerator
             constructor.AppendLine($"        {v.GetInitialiserString()};");
         }
 
-        var source = GenerateMainSource(usings, namespaceName, className, variables, constructor, print);
+        var source = GenerateMainSource(usings, namespaceName, className, variables, constructor, print, settings);
         spc.AddSource($"{className}.g.cs", SourceText.From(source, Encoding.UTF8));
 
-        if (!elements.Any(v => v is VaultConfigVariable))
+        if (elements.Any(v => v is VaultConfigVariable))
         {
-            return;
+            if (!variableSet.Contains("VaultIp"))
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG1", "Missing vault-ip",
+                    "A default member named VaultIp has been added to load the vault ip from env-vars", "",
+                    DiagnosticSeverity.Info, true), null));
+                vaultVariables.AppendLine($"    public static string? VaultIp {{ get; }}");
+            }
+
+            if (!variableSet.Contains("VaultToken"))
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG2", "Missing vault-token",
+                    "A default member named VaultToken has been added to load the token from env-vars", "",
+                    DiagnosticSeverity.Info, true), null));
+                vaultVariables.AppendLine($"    public static string? VaultToken {{ get; }}");
+            }
+
+            if (!variableSet.Contains("VaultUnsealKey"))
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG3", "Missing vault-unseal-key",
+                    "A default member named VaultUnsealKey has been added to load the unseal key from env-vars", "",
+                    DiagnosticSeverity.Info, true), null));
+                vaultVariables.AppendLine($"    public static string? VaultUnsealKey {{ get; }}");
+            }
+
+            var vaultSource = GenerateVaultSource(namespaceName, className);
+            spc.AddSource($"{className}.vault.g.cs", SourceText.From(vaultSource, Encoding.UTF8));
         }
 
-        if (!variableSet.Contains("VaultIp"))
+        if (settings.OutputLog)
         {
-            spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG1", "Missing vault-ip",
-                "A default member named VaultIp has been added to load the vault ip from env-vars", "",
-                DiagnosticSeverity.Info, true), null));
-            vaultVariables.AppendLine($"    public static string? VaultIp {{ get; }}");
+            var logSource = GenerateLogSource(namespaceName, className);
+            spc.AddSource($"{className}.log.g.cs", SourceText.From(logSource, Encoding.UTF8));
         }
 
-        if (!variableSet.Contains("VaultToken"))
+        if (settings.LoadEnvFile)
         {
-            spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG2", "Missing vault-token",
-                "A default member named VaultToken has been added to load the token from env-vars", "",
-                DiagnosticSeverity.Info, true), null));
-            vaultVariables.AppendLine($"    public static string? VaultToken {{ get; }}");
+            var envSource = GenerateEnvSource(namespaceName, className, settings);
+            spc.AddSource($"{className}.env.g.cs", SourceText.From(envSource, Encoding.UTF8));
         }
-
-        if (!variableSet.Contains("VaultUnsealKey"))
-        {
-            spc.ReportDiagnostic(Diagnostic.Create(new DiagnosticDescriptor("CCG3", "Missing vault-unseal-key",
-                "A default member named VaultUnsealKey has been added to load the unseal key from env-vars", "",
-                DiagnosticSeverity.Info, true), null));
-            vaultVariables.AppendLine($"    public static string? VaultUnsealKey {{ get; }}");
-        }
-
-        var vaultSource = GenerateVaultSource(usings, namespaceName, className);
-        spc.AddSource($"{className}.vault.g.cs", SourceText.From(vaultSource, Encoding.UTF8));
     }
 
     private static ConfigVariable SelectVarType(AttributeData attribute)
     {
-        if (attribute.AttributeClass!.Name == "ConstantConfigElement")
+        switch (attribute.AttributeClass!.Name)
         {
-            var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Init");
-            if (param.Value.Value is string value)
+            case "ConstantConfigElement":
             {
-                return new ConstantConfigVariable
+                var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Init");
+                if (param.Value.Value is string value)
                 {
-                    ConstantVariable = value
-                };
-            }
-        }
-        else if (attribute.AttributeClass!.Name == "VaultConfigElement" ||
-                 attribute.AttributeClass!.Name == "EnvConfigElement")
-        {
-            var defaultValue = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Default");
-            LoadableConfigVariable ret;
-            switch (attribute.AttributeClass!.Name)
-            {
-                case "VaultConfigElement":
-                {
-                    var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "FromVaultPath");
-                    if (param.Value.Value is string value)
+                    return new ConstantConfigVariable
                     {
-                        ret = new VaultConfigVariable()
-                        {
-                            VaultVariable = value
-                        };
-                    }
-                    else
-                    {
-                        throw new Exception("No vault path specified");
-                    }
-
-                    break;
-                }
-                case "EnvConfigElement":
-                {
-                    var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "IsJson");
-                    ret = new EnvConfigVariable
-                    {
-                        IsJson = param.Value.Value as bool? ?? false
+                        ConstantVariable = value
                     };
+                }
+
+                break;
+            }
+            case "VaultConfigElement":
+            case "EnvConfigElement":
+            {
+                var defaultValue = attribute.NamedArguments.FirstOrDefault(v => v.Key == "Default");
+                LoadableConfigVariable ret;
+                switch (attribute.AttributeClass!.Name)
+                {
+                    case "VaultConfigElement":
+                    {
+                        var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "FromVaultPath");
+                        if (param.Value.Value is string value)
+                        {
+                            ret = new VaultConfigVariable()
+                            {
+                                VaultVariable = value
+                            };
+                        }
+                        else
+                        {
+                            throw new Exception("No vault path specified");
+                        }
+
+                        break;
+                    }
+                    case "EnvConfigElement":
+                    {
+                        var param = attribute.NamedArguments.FirstOrDefault(v => v.Key == "IsJson");
+                        ret = new EnvConfigVariable
+                        {
+                            IsJson = param.Value.Value as bool? ?? false
+                        };
+
+                        break;
+                    }
+                    default: throw new InvalidOperationException("Unreachable 2");
+                }
+
+                if (!defaultValue.Value.IsNull)
+                {
+                    ret.DefaultValue = new Optional<string>(ToLiteral(defaultValue.Value));
+                }
+
+                return ret;
+            }
+        }
+
+        throw new InvalidOperationException("Unreachable 3");
+    }
+
+    private static void ParseConfiguration(AttributeData attribute, ref Configuration config)
+    {
+        foreach (var v in attribute.NamedArguments)
+        {
+            switch (v.Key)
+            {
+                case "OutputLog":
+                {
+                    if (v.Value.Value is bool value)
+                    {
+                        config.OutputLog = value;
+                    }
 
                     break;
                 }
-                default: throw new InvalidOperationException("Unreachable 2");
-            }
+                case "LoadEnvFile":
+                {
+                    if (v.Value.Value is bool value)
+                    {
+                        config.LoadEnvFile = value;
+                    }
 
-            if (!defaultValue.Value.IsNull)
-            {
-                ret.DefaultValue = new Optional<string>(ToLiteral(defaultValue.Value));
+                    break;
+                }
             }
-
-            return ret;
         }
-
-        throw new InvalidOperationException("Unreachable 2");
     }
 
     private static ConfigVariable ParseConfigElement(AttributeData attribute, HashSet<string> usings)
@@ -297,11 +345,13 @@ public class ConfigGenerator : IIncrementalGenerator
         return configVar;
     }
 
-    private static string GenerateVaultSource(HashSet<string> usings, string namespaceName, string className)
+    private static string GenerateVaultSource(string namespaceName, string className)
     {
         var vaultSource =
-            $$""""
-              {{string.Join("\n", usings.OrderBy(v => v))}}
+            $$"""
+              using System.Net;
+              using System.Net.Http;
+              using System.Text.Json;
               namespace {{namespaceName}}
               {
               #nullable enable
@@ -326,7 +376,7 @@ public class ConfigGenerator : IIncrementalGenerator
                     {
                         return LoadFromVault(path, member, defaultValue, true);
                     }
-                    catch (AggregateException e)
+                    catch (AggregateException)
                     {
                         HostNotFound = true;
                         return string.Empty;
@@ -350,7 +400,7 @@ public class ConfigGenerator : IIncrementalGenerator
                             throw new VaultException($"Could not load {path}: {res.ReasonPhrase}.");                        
                         }
                         var resString = res.Content.ReadAsStringAsync().Result;
-                        cached = JsonSerializer.Deserialize<VaultResponse>(resString).data.data;
+                        cached = JsonSerializer.Deserialize<VaultResponse>(resString)?.data.data;
                         if(cached is null)
                         {
                             throw new VaultException($"Could not load {path}: JsonSerializer failed.");
@@ -414,7 +464,7 @@ public class ConfigGenerator : IIncrementalGenerator
                     public string mount_type { get; set; } = null!;
                     public class Data
                     {
-                        public Dictionary<string, string> data { get; set; }
+                        public Dictionary<string, string> data { get; set; } = new();
                         public Metadata metadata { get; set; } = null!;
                     }
                     
@@ -429,26 +479,25 @@ public class ConfigGenerator : IIncrementalGenerator
                   }
               }
               }
-              """";
+              """;
         return vaultSource;
     }
 
-    private static string GenerateMainSource(HashSet<string> usings, string namespaceName, string className,
-        StringBuilder variables, StringBuilder constructor, StringBuilder print)
+    private static string GenerateLogSource(string namespaceName, string className)
     {
         var source =
-            $$""""
-              {{string.Join("\n", usings.OrderBy(v => v))}}
+            $$"""
+              using Microsoft.Extensions.Logging;
+              using Microsoft.Extensions.Logging.Console;
               namespace {{namespaceName}}
               {
               #nullable enable
               public static partial class {{className}}
               {
-                  public class EnvVarException(string message) : Exception(message);
-                  private static readonly ILoggerFactory LoggerFactory;
-                  private static readonly ILoggerFactory LoggerFactoryMultiLine;
-              {{variables}}
-                  static {{className}}()
+                  private static ILoggerFactory LoggerFactory = null!;
+                  private static ILoggerFactory LoggerFactoryMultiLine = null!;
+                  
+                  static partial void InitLogging()
                   {
                       LoggerFactory =
                           Microsoft.Extensions.Logging.LoggerFactory.Create(builder => builder.AddSimpleConsole(options =>
@@ -466,11 +515,113 @@ public class ConfigGenerator : IIncrementalGenerator
                               options.TimestampFormat = "HH:mm:ss ";
                               options.ColorBehavior = LoggerColorBehavior.Enabled;
                           }));
-                      var logger = GetLoggerMulti("Config");
-                      Load(Path.Combine(Directory.GetCurrentDirectory(), ".env"), logger, out var i);
+                  }
+                  
+                  public static ILogger GetLogger(string name)
+                  {
+                      return LoggerFactory.CreateLogger(name);
+                  }
+                  
+                  public static ILogger<T> GetLogger<T>()
+                  {
+                      return LoggerFactory.CreateLogger<T>();
+                  }
+                  
+                  public static ILogger GetLoggerMulti(string name)
+                  {
+                      return LoggerFactoryMultiLine.CreateLogger(name);
+                  }
+                  
+                  public static ILogger<T> GetLoggerMulti<T>()
+                  {
+                      return LoggerFactoryMultiLine.CreateLogger<T>();
+                  }
+              }
+              }
+              """;
+        return source;
+    }
+
+    private static string GenerateEnvSource(string namespaceName, string className, Configuration config)
+    {
+        var source =
+            $$""""
+              {{(config.OutputLog ? "#define SHOW_LOG" : "")}}
+              using Microsoft.Extensions.Logging;
+              using System.Text.Json;
+              using System.Text.RegularExpressions;
+              namespace {{namespaceName}}
+              {
+              #nullable enable
+              public static partial class {{className}}
+              {
+                  private static bool Load(string path, object? logger, out int n)
+                  {
+                      n = 0;
+                      if (!File.Exists(path))
+                      {
+              #if SHOW_LOG
+                          (logger as ILogger)!.LogWarning("""
+                                             Failed to load .env file
+                                             File not found: {Path}
+                                             """, path);
+              #endif
+                          return false;
+                      }
+                      var commentMatcher = new Regex(" #.*$");
+                      var lines = File.ReadAllLines(path).Select(l => commentMatcher.Replace(l, "").Trim())
+                          .Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
+                      foreach (var line in lines)
+                      {
+                          var split = line.Split('=').Select(l => l.Trim()).ToArray();
+                          var name = split[0];
+                          var value = split[1];
+                          Environment.SetEnvironmentVariable(name, value);
+                          n++;
+                      }
+                  
+                      return true;
+                  }
+              }
+              }
+              """";
+        return source;
+    }
+
+    private static string GenerateMainSource(HashSet<string> usings, string namespaceName, string className,
+        StringBuilder variables, StringBuilder constructor, StringBuilder print, Configuration config)
+    {
+        var source =
+            $$""""
+              {{(config.LoadEnvFile ? "#define LOAD_ENV_FILE" : "")}}
+              {{(config.OutputLog ? "#define SHOW_LOG" : "")}}
+              {{string.Join("\n", usings.OrderBy(v => v))}}
+              #if SHOW_LOG
+              using Microsoft.Extensions.Logging;
+              #endif
+              namespace {{namespaceName}}
+              {
+              #nullable enable
+              public static partial class {{className}}
+              {
+                  public class EnvVarException(string message) : Exception(message);
+                  static partial void InitLogging();
+              {{variables}}
+                  static {{className}}()
+                  {
+                      InitLogging();
+              #if LOAD_ENV_FILE
+              #if SHOW_LOG
+                      Load(Path.Combine(Directory.GetCurrentDirectory(), ".env"), GetLoggerMulti("EnvLoader"), out var i);
+                      GetLogger("Config").LogInformation($"Loaded {i} environment variables from file.");
+              #else
+                      Load(Path.Combine(Directory.GetCurrentDirectory(), ".env"), null, out var i);
+              #endif
+              #endif
               {{constructor}}
-                      GetLogger("Config").LogInformation($"Loaded {i} environment variables.");
-                      logger.LogInformation($"{{print}}");
+              #if SHOW_LOG
+                      GetLoggerMulti("Config").LogInformation($"{{print}}");
+              #endif
                   }
                   /// <summary>
                   /// Returns an env variable or <paramref name="defaultValue"/>
@@ -568,51 +719,6 @@ public class ConfigGenerator : IIncrementalGenerator
                       }
                   
                       return f;
-                  }
-                  
-                  private static bool Load(string path, ILogger logger, out int n)
-                  {
-                      n = 0;
-                      if (!File.Exists(path))
-                      {
-                          logger.LogWarning("""
-                                             Failed to load .env file
-                                             File not found: {Path}
-                                             """, path);
-                          return false;
-                      }
-                  
-                      var lines = File.ReadAllLines(path).Select(l => CommentMatcher().Replace(l, "").Trim())
-                          .Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
-                      foreach (var line in lines)
-                      {
-                          var split = line.Split('=').Select(l => l.Trim()).ToArray();
-                          var name = split[0];
-                          var value = split[1];
-                          Environment.SetEnvironmentVariable(name, value);
-                          n++;
-                      }
-                  
-                      return true;
-                  }
-                  public static ILogger GetLogger(string name)
-                  {
-                      return LoggerFactory.CreateLogger(name);
-                  }
-                  
-                  public static ILogger<T> GetLogger<T>()
-                  {
-                      return LoggerFactory.CreateLogger<T>();
-                  }
-                  
-                  public static ILogger GetLoggerMulti(string name)
-                  {
-                      return LoggerFactoryMultiLine.CreateLogger(name);
-                  }
-                  
-                  public static ILogger<T> GetLoggerMulti<T>()
-                  {
-                      return LoggerFactoryMultiLine.CreateLogger<T>();
                   }
               }
               }
